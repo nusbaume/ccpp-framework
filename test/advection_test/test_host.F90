@@ -139,6 +139,7 @@ contains
   subroutine test_host(retval, test_suites)
 
     use ccpp_constituent_prop_mod, only: ccpp_constituent_prop_ptr_t
+    use ccpp_constituent_prop_mod, only: int_unassigned, kphys_unassigned
     use test_host_mod, only: num_time_steps
     use test_host_mod, only: init_data, &
         compare_data
@@ -181,6 +182,8 @@ contains
     logical :: has_default
     integer :: test_scalar_const_index
     integer :: test_const_indices(num_consts)
+    integer :: check_index
+    type(ccpp_constituent_properties_t) :: test_water_tracer
     character(len=128), allocatable :: suite_names(:)
     character(len=256) :: const_str
     character(len=512) :: errmsg
@@ -940,6 +943,189 @@ contains
       ! Reset error flag to continue testing other properties:
       errflg = 0
     end if
+    ! -------------------
+
+    ! ------------------
+    ! water-tracer tests:
+    ! ------------------
+
+    ! Check that the water tracer properties default to being unset:
+    call const_props(index_dyn2)%is_water_tracer(check, errflg, errmsg)
+    if (errflg /= 0) then
+      write(6, '(a,i0,a,a,i0,/,a)') "ERROR: Error, ", errflg, " trying ", &
+          "to get water_tracer prop for dyn_const2 index = ", index_dyn2, &
+          trim(errmsg)
+      errflg_final = -1 ! Notify test script that a failure occurred
+    end if
+    if (errflg == 0) then
+      if (check) then ! Should be False
+        write(6, *) "ERROR: 'is_water_tracer' should default to False ", &
+            "for all constituents unless set at registration."
+        errflg_final = -1 ! Notify test script that a failure occured
+      end if
+    else
+      ! Reset error flag to continue testing other properties:
+      errflg = 0
+    end if
+
+    call const_props(index_dyn2)%bulk_water_index(check_index, errflg, errmsg)
+    if (errflg /= 0) then
+      write(6, '(a,i0,a,a,i0,/,a)') "ERROR: Error, ", errflg, " trying ", &
+          "to get bulk_water_index prop for dyn_const2 index = ", &
+          index_dyn2, trim(errmsg)
+      errflg_final = -1 ! Notify test script that a failure occurred
+    end if
+    if (errflg == 0) then
+      if (check_index /= int_unassigned) then ! Should be unassigned
+        write(6, *) "ERROR: 'bulk_water_index' should default to ", &
+            "int_unassigned unless set at registration."
+        errflg_final = -1 ! Notify test script that a failure occured
+      end if
+    else
+      ! Reset error flag to continue testing other properties:
+      errflg = 0
+    end if
+
+    call const_props(index_dyn2)%prescribed_ratio(check_value, errflg, errmsg)
+    if (errflg /= 0) then
+      write(6, '(a,i0,a,a,i0,/,a)') "ERROR: Error, ", errflg, " trying ", &
+          "to get prescribed_ratio prop for dyn_const2 index = ", &
+          index_dyn2, trim(errmsg)
+      errflg_final = -1 ! Notify test script that a failure occurred
+    end if
+    if (errflg == 0) then
+      if (check_value /= kphys_unassigned) then ! Should be unassigned
+        write(6, *) "ERROR: 'prescribed_ratio' should default to ", &
+            "kphys_unassigned unless set at registration."
+        errflg_final = -1 ! Notify test script that a failure occured
+      end if
+    else
+      ! Reset error flag to continue testing other properties:
+      errflg = 0
+    end if
+
+    ! Check that setting the water tracer properties via the
+    ! instantiate call works as expected:
+    call const_props(index_dyn1)%is_water_tracer(check, errflg, errmsg)
+    if (errflg /= 0) then
+      write(6, '(a,i0,a,i0,/,a)') "ERROR: Error, ", errflg, &
+          "trying to get water_tracer prop for dyn_const1 index = ", &
+          index_dyn1, trim(errmsg)
+      errflg_final = -1 ! Notify test script that a failure occurred
+    end if
+    if (errflg == 0) then
+      if (.not. check) then ! Should now be True
+        write(6, *) "ERROR: 'water_tracer=.true. did not set", &
+            " water_tracer constituent property correctly"
+        errflg_final = -1 ! Notify test script that a failure occurred
+      end if
+    else
+      ! Reset error flag to continue testing other properties:
+      errflg = 0
+    end if
+
+    call const_props(index_dyn1)%prescribed_ratio(check_value, errflg, errmsg)
+    if (errflg /= 0) then
+      write(6, '(a,i0,a,i0,/,a)') "ERROR: Error, ", errflg, &
+          "trying to get prescribed_ratio prop for dyn_const1 index = ", &
+          index_dyn1, trim(errmsg)
+      errflg_final = -1 ! Notify test script that a failure occurred
+    end if
+    if (errflg == 0) then
+      if (check_value /= 0.5_kind_phys) then ! Should now be one half
+        write(6, *) "ERROR: 'prescribed_ratio=0.5 did not set", &
+            " prescribed_ratio constituent property correctly"
+        errflg_final = -1 ! Notify test script that a failure occurred
+      end if
+    else
+      ! Reset error flag to continue testing other properties:
+      errflg = 0
+    end if
+
+    ! dyn_const1 was registered as a water tracer without a bulk water
+    ! index, so it should still be unassigned at this point:
+    call const_props(index_dyn1)%bulk_water_index(check_index, errflg, errmsg)
+    if (errflg /= 0) then
+      write(6, '(a,i0,a,i0,/,a)') "ERROR: Error, ", errflg, &
+          "trying to get bulk_water_index prop for dyn_const1 index = ", &
+          index_dyn1, trim(errmsg)
+      errflg_final = -1 ! Notify test script that a failure occurred
+    end if
+    if (errflg == 0) then
+      if (check_index /= int_unassigned) then ! Should be unassigned
+        write(6, *) "ERROR: 'bulk_water_index' should default to ", &
+            "int_unassigned unless set at registration."
+        errflg_final = -1 ! Notify test script that a failure occured
+      end if
+    else
+      ! Reset error flag to continue testing other properties:
+      errflg = 0
+    end if
+
+    ! Check that the host model can set the bulk water index now that the
+    ! constituent indices are known:
+    call const_props(index_dyn1)%set_bulk_water_index(index_dyn2, errflg, &
+        errmsg)
+    if (errflg /= 0) then
+      write(6, '(a,i0,a,a,i0,/,a)') "ERROR: Error, ", errflg, " trying ", &
+          "to set bulk_water_index prop for dyn_const1 index = ", &
+          index_dyn1, trim(errmsg)
+      errflg_final = -1 ! Notify test script that a failure occurred
+    end if
+    if (errflg == 0) then
+      call const_props(index_dyn1)%bulk_water_index(check_index, errflg, &
+          errmsg)
+      if (errflg /= 0) then
+        write(6, '(a,i0,a,i0,/,a)') "ERROR: Error, ", errflg, &
+            " trying to get bulk_water_index prop for dyn_const1 index = ", &
+            index_dyn1, trim(errmsg)
+        errflg_final = -1 ! Notify test script that a failure occurred
+      end if
+    end if
+    if (errflg == 0) then
+      if (check_index /= index_dyn2) then ! Should now be dyn_const2's index
+        write(6, *) "ERROR: 'set_bulk_water_index' did not set", &
+            " bulk_water_index constituent property correctly."
+        errflg_final = -1 ! Notify test script that a failure occurred
+      end if
+    else
+      ! Reset error flag to continue testing other properties:
+      errflg = 0
+    end if
+
+    ! Check that the bulk water index cannot be set a second time:
+    call const_props(index_dyn1)%set_bulk_water_index(index_dyn2, errflg, &
+        errmsg)
+    if (errflg == 0) then
+      write(6, *) "ERROR: 'set_bulk_water_index' should not be able to ", &
+          "reset a bulk_water_index which is already set."
+      errflg_final = -1 ! Notify test script that a failure occurred
+    end if
+    errflg = 0
+
+    ! Check that the bulk water index cannot be set for a constituent
+    ! which is not a water tracer:
+    call const_props(index_dyn2)%set_bulk_water_index(index_dyn1, errflg, &
+        errmsg)
+    if (errflg == 0) then
+      write(6, *) "ERROR: 'set_bulk_water_index' should not be settable ", &
+          "for a constituent which is not a water tracer."
+      errflg_final = -1 ! Notify test script that a failure occurred
+    end if
+    errflg = 0
+
+    ! Check that the prescribed ratio cannot be set for a constituent
+    ! which is not a water tracer:
+    call test_water_tracer%instantiate(std_name='not_a_water_tracer', &
+        long_name='not a water tracer', diag_name='NOTRACER', &
+        units='kg kg-1', vertical_dim='vertical_layer_dimension', &
+        prescribed_ratio=0.5_kind_phys, errcode=errflg, errmsg=errmsg)
+    if (errflg == 0) then
+      write(6, *) "ERROR: 'prescribed_ratio' should not be settable for ", &
+          "a constituent which is not a water tracer."
+      errflg_final = -1 ! Notify test script that a failure occurred
+    end if
+    errflg = 0
     ! -------------------
 
     ! Check that setting a constituent's default value works as expected
