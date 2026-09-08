@@ -37,6 +37,7 @@ contains
         diag_name='DYNCONST1', units='kg kg-1', default_value=0._kind_phys, &
         vertical_dim='vertical_layer_dimension', advected=.true., &
         min_value=1000._kind_phys, water_species=.true., mixing_ratio_type='wet', &
+        water_tracer=.true., prescribed_ratio=0.5_kind_phys, &
         errcode=errcode, errmsg=errmsg)
     call dyn_const_ice(2)%instantiate(std_name='dyn_const2_wrt_moist_air', long_name='dyn const2', &
         diag_name='DYNCONST2', units='kg kg-1', default_value=0._kind_phys, &

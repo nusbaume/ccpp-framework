@@ -26,7 +26,7 @@ module ccpp_constituent_prop_mod
   integer, parameter :: volume_mixing_ratio = -6
   integer, parameter :: number_concentration = -7
   integer, public, parameter :: int_unassigned = -huge(1)
-  real(kind=kind_phys), parameter :: kphys_unassigned = huge(1.0_kind_phys)
+  real(kind=kind_phys), public, parameter :: kphys_unassigned = huge(1.0_kind_phys)
 
   !! \section arg_table_ccpp_constituent_properties_t
   !! \htmlinclude ccpp_constituent_properties_t.html
@@ -43,6 +43,25 @@ module ccpp_constituent_prop_mod
     logical, private :: advected = .false.
     logical, private :: thermo_active = .false.
     logical, private :: water_species = .false.
+
+    !-------------------------------------------------------------
+    ! NOTE: The following three properties are quite specialized,
+    ! and would be excellent candidates, along with their associated
+    ! procedures, for being moved into a host-extended type!
+    !-------------------------------------------------------------
+    ! water_tracer indicates that this constituent is a water tracer, i.e.
+    !    a constituent which tracks a particular bulk water constituent
+    logical, private :: water_tracer = .false.
+    ! bulk_water_ind is the constituent index of the bulk water species
+    !    that this water tracer is tracking.  Please note that this
+    !    property can only be set via the 'set_bulk_water_index' routine,
+    !    as there is no way to know the correct value at register time.
+    integer, private :: bulk_water_ind = int_unassigned
+    ! prescribed_ratio_val is the ratio that this water tracer is prescribed
+    !    to have with respect to its bulk water constituent
+    real(kind=kind_phys), private :: prescribed_ratio_val = kphys_unassigned
+    !--------------------------------------------------------------
+
     ! While the quantities below can be derived from the standard name,
     !    this implementation avoids string searching in parameterizations
     ! const_type distinguishes mass, volume, and number conc. mixing ratios
@@ -79,6 +98,9 @@ module ccpp_constituent_prop_mod
     procedure :: is_advected => ccp_is_advected
     procedure :: is_thermo_active => ccp_is_thermo_active
     procedure :: is_water_species => ccp_is_water_species
+    procedure :: is_water_tracer => ccp_is_water_tracer
+    procedure :: bulk_water_index => ccp_bulk_water_index
+    procedure :: prescribed_ratio => ccp_prescribed_ratio
     procedure :: equivalent => ccp_is_equivalent
     procedure :: is_mass_mixing_ratio => ccp_is_mass_mixing_ratio
     procedure :: is_volume_mixing_ratio => ccp_is_volume_mixing_ratio
@@ -98,6 +120,7 @@ module ccpp_constituent_prop_mod
     procedure :: instantiate => ccp_instantiate
     procedure :: deallocate => ccp_deallocate
     procedure :: set_const_index => ccp_set_const_index
+    procedure :: set_bulk_water_index => ccp_set_bulk_water_index
     procedure :: set_thermo_active => ccp_set_thermo_active
     procedure :: set_water_species => ccp_set_water_species
     procedure :: set_minimum => ccp_set_min_val
@@ -126,6 +149,9 @@ module ccpp_constituent_prop_mod
     procedure :: is_advected => ccpt_is_advected
     procedure :: is_thermo_active => ccpt_is_thermo_active
     procedure :: is_water_species => ccpt_is_water_species
+    procedure :: is_water_tracer => ccpt_is_water_tracer
+    procedure :: bulk_water_index => ccpt_bulk_water_index
+    procedure :: prescribed_ratio => ccpt_prescribed_ratio
     procedure :: is_mass_mixing_ratio => ccpt_is_mass_mixing_ratio
     procedure :: is_volume_mixing_ratio => ccpt_is_volume_mixing_ratio
     procedure :: is_number_concentration => ccpt_is_number_concentration
@@ -141,6 +167,7 @@ module ccpp_constituent_prop_mod
     ! Methods that change state (XXgoldyXX: make private?)
     procedure :: deallocate => ccpt_deallocate
     procedure :: set_const_index => ccpt_set_const_index
+    procedure :: set_bulk_water_index => ccpt_set_bulk_water_index
     procedure :: set_thermo_active => ccpt_set_thermo_active
     procedure :: set_water_species => ccpt_set_water_species
     procedure :: set_minimum => ccpt_set_min_val
@@ -247,6 +274,9 @@ contains
     outconst%molar_mass_val = inconst%molar_mass_val
     outconst%thermo_active = inconst%thermo_active
     outconst%water_species = inconst%water_species
+    outconst%water_tracer = inconst%water_tracer
+    outconst%bulk_water_ind = inconst%bulk_water_ind
+    outconst%prescribed_ratio_val = inconst%prescribed_ratio_val
     outconst%var_units = inconst%var_units
     outconst%const_water = inconst%const_water
   end subroutine copyconstituent
@@ -393,7 +423,8 @@ contains
 
   subroutine ccp_instantiate(this, std_name, long_name, diag_name, units, &
       vertical_dim, advected, default_value, min_value, molar_mass, water_species, &
-      mixing_ratio_type, errcode, errmsg)
+      mixing_ratio_type, water_tracer, prescribed_ratio, &
+      errcode, errmsg)
     ! Initialize all fields in <this>
 
     ! Dummy arguments
@@ -409,6 +440,8 @@ contains
     real(kind=kind_phys), optional, intent(in) :: molar_mass
     logical, optional, intent(in) :: water_species
     character(len=*), optional, intent(in) :: mixing_ratio_type
+    logical, optional, intent(in) :: water_tracer
+    real(kind=kind_phys), optional, intent(in) :: prescribed_ratio
     integer, intent(out) :: errcode
     character(len=*), intent(out) :: errmsg
 
@@ -442,6 +475,24 @@ contains
       end if
       if (present(water_species)) then
         this%water_species = water_species
+      end if
+      if (present(water_tracer)) then
+        this%water_tracer = water_tracer
+      end if
+      if (present(prescribed_ratio)) then
+        this%prescribed_ratio_val = prescribed_ratio
+      end if
+    end if
+    if (errcode == 0) then
+      ! The prescribed ratio only has meaning for a water tracer,
+      !    so only allow it to be set for one
+      if (.not. this%water_tracer) then
+        if (present(prescribed_ratio)) then
+          errcode = 1
+          write(errmsg, *) 'ccp_instantiate: "prescribed_ratio" may only ', &
+              'be set for a water tracer, but "', trim(std_name), &
+              '" is not a water tracer'
+        end if
       end if
     end if
     if (errcode == 0) then
@@ -510,6 +561,9 @@ contains
     this%const_type = int_unassigned
     this%const_water = int_unassigned
     this%const_default_value = kphys_unassigned
+    this%water_tracer = .false.
+    this%bulk_water_ind = int_unassigned
+    this%prescribed_ratio_val = kphys_unassigned
     this%framework_owns_me = .false.
 
   end subroutine ccp_deallocate
@@ -802,6 +856,97 @@ contains
 
   !#######################################################################
 
+  subroutine ccp_is_water_tracer(this, val_out, errcode, errmsg)
+
+    ! Dummy arguments
+    class(ccpp_constituent_properties_t), intent(in) :: this
+    logical, intent(out) :: val_out
+    integer, optional, intent(out) :: errcode
+    character(len=*), optional, intent(out) :: errmsg
+
+    !If instantiated then check if constituent is
+    !a water tracer, otherwise return false:
+    if (this%is_instantiated(errcode, errmsg)) then
+      val_out = this%water_tracer
+    else
+      val_out = .false.
+    end if
+  end subroutine ccp_is_water_tracer
+
+  !#######################################################################
+
+  integer function ccp_bulk_water_index(this, errcode, errmsg)
+    ! Return the constituent index of the bulk water species that this
+    ! water tracer is tracking (or int_unassigned if not assigned)
+
+    ! Dummy arguments
+    class(ccpp_constituent_properties_t), intent(in) :: this
+    integer, optional, intent(out) :: errcode
+    character(len=*), optional, intent(out) :: errmsg
+
+    if (this%is_instantiated(errcode, errmsg)) then
+      ccp_bulk_water_index = this%bulk_water_ind
+    else
+      ccp_bulk_water_index = int_unassigned
+    end if
+
+  end function ccp_bulk_water_index
+
+  !#######################################################################
+
+  subroutine ccp_set_bulk_water_index(this, index, errcode, errmsg)
+    ! Set the constituent index of the bulk water species that this water
+    ! tracer is tracking. This index is generally not known until the
+    ! constituent properties table has been locked, so it may be set here
+    ! instead of at registration.
+    ! It is an error to set this index for a constituent which is not a
+    ! water tracer, or to set it if it is already set
+
+    ! Dummy arguments
+    class(ccpp_constituent_properties_t), intent(inout) :: this
+    integer, intent(in) :: index
+    integer, optional, intent(out) :: errcode
+    character(len=*), optional, intent(out) :: errmsg
+    character(len=*), parameter :: subname = 'ccp_set_bulk_water_index'
+
+    if (this%is_instantiated(errcode, errmsg)) then
+      if (.not. this%water_tracer) then
+        call append_errvars(1, "ccpp_constituent_properties_t bulk water " // &
+            "index may only be set for a water tracer", &
+            subname, errcode=errcode, errmsg=errmsg)
+      else if (this%bulk_water_ind == int_unassigned) then
+        this%bulk_water_ind = index
+      else
+        call append_errvars(1, "ccpp_constituent_properties_t bulk water " // &
+            "index is already set", subname, errcode=errcode, errmsg=errmsg)
+      end if
+    end if
+
+  end subroutine ccp_set_bulk_water_index
+
+  !#######################################################################
+
+  subroutine ccp_prescribed_ratio(this, val_out, errcode, errmsg)
+    ! Return the ratio that this water tracer is prescribed to have with
+    ! respect to its bulk water constituent (or kphys_unassigned if
+    ! not assigned)
+
+    ! Dummy arguments
+    class(ccpp_constituent_properties_t), intent(in) :: this
+    real(kind=kind_phys), intent(out) :: val_out
+    integer, optional, intent(out) :: errcode
+    character(len=*), optional, intent(out) :: errmsg
+
+    if (this%is_instantiated(errcode, errmsg)) then
+      val_out = this%prescribed_ratio_val
+    else
+      val_out = kphys_unassigned
+    end if
+
+  end subroutine ccp_prescribed_ratio
+
+  !#######################################################################
+
   subroutine ccp_is_advected(this, val_out, errcode, errmsg)
 
     ! Dummy arguments
@@ -841,7 +986,10 @@ contains
           (this%molar_mass_val == oconst%molar_mass_val) .and. &
           (this%thermo_active .eqv. oconst%thermo_active) .and. &
           (this%const_water == oconst%const_water) .and. &
-          (this%water_species .eqv. oconst%water_species)
+          (this%water_species .eqv. oconst%water_species) .and. &
+          (this%water_tracer .eqv. oconst%water_tracer) .and. &
+          (this%bulk_water_ind == oconst%bulk_water_ind) .and. &
+          (this%prescribed_ratio_val == oconst%prescribed_ratio_val)
     else
       equiv = .false.
     end if
@@ -1076,11 +1224,13 @@ contains
     type(ccpp_constituent_properties_t), intent(in) :: comp_props
     ! Local variable
     logical :: val, comp_val
+    real(kind=kind_phys) :: rval, comp_rval
     character(len=stdname_len) :: char_val, char_comp_val
 
     ! By default, every constituent is a match
     is_match = .true.
-    ! Check: advected, thermo_active, water_species, units
+    ! Check: advected, thermo_active, water_species, water_tracer,
+    !        bulk_water_index, prescribed_ratio, units
     call this%is_advected(val)
     call comp_props%is_advected(comp_val)
     if (val .neqv. comp_val) then
@@ -1098,6 +1248,25 @@ contains
     call this%is_water_species(val)
     call comp_props%is_water_species(comp_val)
     if (val .neqv. comp_val) then
+      is_match = .false.
+      return
+    end if
+
+    call this%is_water_tracer(val)
+    call comp_props%is_water_tracer(comp_val)
+    if (val .neqv. comp_val) then
+      is_match = .false.
+      return
+    end if
+
+    if (this%bulk_water_index() /= comp_props%bulk_water_index()) then
+      is_match = .false.
+      return
+    end if
+
+    call this%prescribed_ratio(rval)
+    call comp_props%prescribed_ratio(comp_rval)
+    if (rval /= comp_rval) then
       is_match = .false.
       return
     end if
@@ -2252,6 +2421,104 @@ contains
     end if
 
   end subroutine ccpt_is_water_species
+
+  !#######################################################################
+
+  subroutine ccpt_is_water_tracer(this, val_out, errcode, errmsg)
+
+    ! Dummy arguments
+    class(ccpp_constituent_prop_ptr_t), intent(in) :: this
+    logical, intent(out) :: val_out
+    integer, optional, intent(out) :: errcode
+    character(len=*), optional, intent(out) :: errmsg
+    ! Local variable
+    character(len=*), parameter :: subname = 'ccpt_is_water_tracer'
+
+    if (associated(this%prop)) then
+      call this%prop%is_water_tracer(val_out, errcode, errmsg)
+    else
+      val_out = .false.
+      call append_errvars(1, ": invalid constituent pointer", &
+          subname, errcode=errcode, errmsg=errmsg)
+    end if
+
+  end subroutine ccpt_is_water_tracer
+
+  !#######################################################################
+
+  subroutine ccpt_bulk_water_index(this, index, errcode, errmsg)
+    ! Return the constituent index of the bulk water species that this
+    ! water tracer is tracking (or int_unassigned if not assigned)
+
+    ! Dummy arguments
+    class(ccpp_constituent_prop_ptr_t), intent(in) :: this
+    integer, intent(out) :: index
+    integer, optional, intent(out) :: errcode
+    character(len=*), optional, intent(out) :: errmsg
+    ! Local variable
+    character(len=*), parameter :: subname = 'ccpt_bulk_water_index'
+
+    if (associated(this%prop)) then
+      index = this%prop%bulk_water_index(errcode, errmsg)
+    else
+      index = int_unassigned
+      call append_errvars(1, ": invalid constituent pointer", &
+          subname, errcode=errcode, errmsg=errmsg)
+    end if
+
+  end subroutine ccpt_bulk_water_index
+
+  !#######################################################################
+
+  subroutine ccpt_set_bulk_water_index(this, index, errcode, errmsg)
+    ! Set the constituent index of the bulk water species that this water
+    ! tracer is tracking. This index is generally not known until the
+    ! constituent properties table has been locked, so it may be set here
+    ! instead of at registration.
+    ! It is an error to set this index for a constituent which is not a
+    ! water tracer, or to set it if it is already set
+
+    ! Dummy arguments
+    class(ccpp_constituent_prop_ptr_t), intent(inout) :: this
+    integer, intent(in) :: index
+    integer, optional, intent(out) :: errcode
+    character(len=*), optional, intent(out) :: errmsg
+    ! Local variable
+    character(len=*), parameter :: subname = 'ccpt_set_bulk_water_index'
+
+    if (associated(this%prop)) then
+      call this%prop%set_bulk_water_index(index, errcode, errmsg)
+    else
+      call append_errvars(1, ": invalid constituent pointer", &
+          subname, errcode=errcode, errmsg=errmsg)
+    end if
+
+  end subroutine ccpt_set_bulk_water_index
+
+  !#######################################################################
+
+  subroutine ccpt_prescribed_ratio(this, val_out, errcode, errmsg)
+    ! Return the ratio that this water tracer is prescribed to have with
+    ! respect to its bulk water constituent (or kphys_unassigned if
+    ! not assigned)
+
+    ! Dummy arguments
+    class(ccpp_constituent_prop_ptr_t), intent(in) :: this
+    real(kind=kind_phys), intent(out) :: val_out
+    integer, optional, intent(out) :: errcode
+    character(len=*), optional, intent(out) :: errmsg
+    ! Local variable
+    character(len=*), parameter :: subname = 'ccpt_prescribed_ratio'
+
+    if (associated(this%prop)) then
+      call this%prop%prescribed_ratio(val_out, errcode, errmsg)
+    else
+      val_out = kphys_unassigned
+      call append_errvars(1, ": invalid constituent pointer", &
+          subname, errcode=errcode, errmsg=errmsg)
+    end if
+
+  end subroutine ccpt_prescribed_ratio
 
   !#######################################################################
 
