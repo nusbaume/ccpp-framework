@@ -440,7 +440,10 @@ intentionally left for this discussion.
 | `molar_mass`       | optional | `set_molar_mass` | no |
 | `water_species`    | optional (default .false.) | `set_water_species` | **yes** |
 | `mixing_ratio_type`| optional | **NO** | no |
+| `water_tracer`     | optional (default .false.) | **NO** | **yes** |
+| `prescribed_ratio` | optional (water tracers only) | **NO** | **yes** |
 | `thermo_active`    | not in instantiate | `set_thermo_active` | **yes** |
+| `bulk_water_ind`   | not in instantiate | `set_bulk_water_index` (write-once) | **yes** |
 | `const_index`      | internal | `set_const_index` | no |
 
 **Pain points**:
@@ -467,6 +470,14 @@ intentionally left for this discussion.
 overrides post-registration. Two registrations of the same `std_name`
 with the same `units` but different `advected` should be a
 duplicate-dedup (host wins), not a hard error.
+
+**Got stricter, not looser, on 2026-09-08** (water-tracer properties,
+§4.19): `is_match` now also checks `water_tracer`, `bulk_water_ind` and
+`prescribed_ratio_val`, so it is 7 attributes, 6 of them host-owned.
+`bulk_water_ind` is the awkward one — it is *deliberately* set after the
+table is locked, so it always compares `int_unassigned == int_unassigned`
+at dedup time and the check can never fire.  Whatever relaxation this
+item lands on should drop that check rather than carry it.
 
 ### 4.4 Framework: `diag_name` portability problem (OPEN)
 
@@ -962,6 +973,49 @@ construction.
 
 ---
 
+### 4.19 Framework: water-tracer properties are host-model-specialized (OPEN)
+
+- **Added** 2026-09-08, ported from `origin/water_tracer_mods` commit
+  `7d87ae4` ("Add first round of water tracer properties") onto
+  `feature/capgen-v1`.
+- **What landed**: three properties on
+  `ccpp_constituent_properties_t` (`capgen/src/ccpp_constituent_prop_mod.F90`)
+  plus their `ccpp_constituent_prop_ptr_t` delegates —
+  `water_tracer` (logical, `%instantiate` arg + `is_water_tracer`),
+  `prescribed_ratio_val` (real, `%instantiate` arg + `prescribed_ratio`),
+  and `bulk_water_ind` (integer, `set_bulk_water_index` +
+  `bulk_water_index`).  A water tracer is a constituent that tracks a
+  particular *bulk* water constituent; `prescribed_ratio` is the ratio it
+  is prescribed to hold against that bulk species.  Covered by the
+  `advection` / `advection_auto_clone` e2e hosts (`dyn_const1` is a water
+  tracer with `prescribed_ratio=0.5`).
+- **Why `bulk_water_ind` has a setter but no `%instantiate` arg**: a
+  constituent index is not knowable at register time, so the host sets it
+  after the properties table is locked.  It is **write-once** — setting it
+  twice, or setting it on a non-water-tracer, is an error.  This is the
+  same "post-instantiate-only" shape as `thermo_active` (§4.2).
+- **The open question** — the source commit flags it in a `NOTE` comment
+  on the type itself: all three are **quite specialized, and would be
+  excellent candidates, along with their associated procedures, for being
+  moved into a host-extended type**.  Nothing in the framework consumes
+  them; they are carried for whichever host drives the
+  `water_tracer_mods` work, which has no other place to put per-
+  constituent state.  (The consuming host is not named in the commit —
+  do not assume CAM-SIMA without checking.)  Extending the core type for
+  one host's physics is the thing §5 and Q9 are about.  Deciding it is Q9.
+- **Deliberately NOT extended**: the legacy auto-clone shim
+  (`--legacy-auto-clone-constituents`, FU-012).  Its four extra metadata
+  attributes (`default_value`, `min_value`, `water_species`,
+  `mixing_ratio_type`) exist to reproduce what *original capgen* accepted;
+  `water_tracer` and `prescribed_ratio` never existed there, so adding
+  them would grow a transient shim with new functionality rather than
+  legacy parity.  A host wanting these declares them the capgen-v1 way —
+  register-phase `%instantiate`, or `host_constituents(:)`.
+- **Consequence for §4.3**: `is_match` gained three more checks, one of
+  which (`bulk_water_ind`) can never fire.  See §4.3.
+
+---
+
 ## 5. Property classification (Class A vs Class B)
 
 Proposed 2026-05-12.  (The original write-up lived in an auto-memory
@@ -992,6 +1046,9 @@ constituent property is conceptually owned by either the scheme
 | `min_value`       | Host runtime guardrail. |
 | `water_species`   | (Borderline — see §7) Physical classification but also host-config. |
 | `mixing_ratio_type` | (Borderline — see §7) Depends on dycore convention. |
+| `water_tracer`    | (Fits neither cleanly — see §4.19 / Q9) Host-model-specialized. |
+| `prescribed_ratio`| (Fits neither cleanly — see §4.19 / Q9) Host-model-specialized. |
+| `bulk_water_ind`  | (Fits neither cleanly — see §4.19 / Q9) Host sets it post-lock. |
 
 ### Consequences if adopted
 
@@ -1185,6 +1242,34 @@ These are the calls we need to make in the meeting.
 
 ---
 
+### Q9. Should the water-tracer properties live in a host-extended type? (raised 2026-09-08, §4.19)
+
+`water_tracer`, `prescribed_ratio` and `bulk_water_ind` are the first
+properties on `ccpp_constituent_properties_t` that **no framework code
+path reads**.  They exist so one host's water-isotope / water-tagging
+configuration has somewhere to hang per-constituent state.  Options:
+
+- **Keep them on the core type** (what landed).  Cheapest for the host;
+  every other host and every scheme pays for three unused components,
+  three getters, one setter and three more `is_match` comparisons, and
+  the next specialized property has precedent to follow.
+- **Host-extended type** — the host declares
+  `type, extends(ccpp_constituent_properties_t) :: my_const_props_t`
+  and adds them there.  Requires that the framework store and return
+  `class(...)` rather than `type(...)` wherever it holds properties, and
+  that `copyconstituent` / `new_field` stop assuming the concrete type.
+  That is a real framework change, not a host-side one — which is why
+  the properties landed on the core type first.
+- **A generic key/value side-table** on the properties object.  Solves
+  the whole class rather than this instance, at the cost of losing
+  compile-time names and types.
+
+Not independent of Q2/Q5: if `%instantiate` stops taking class-B args
+(Q5), `water_tracer`/`prescribed_ratio` lose their entry point and the
+answer is forced.
+
+---
+
 ## 8. Three proposals — minimal / clean / deep
 
 ### Proposal A — bugfix only
@@ -1298,7 +1383,8 @@ Instantiation
   procedure :: instantiate     ! takes std_name, long_name, diag_name (REQUIRED),
                                !   units, vertical_dim, plus optional
                                !   advected, default_value, min_value, molar_mass,
-                               !   water_species, mixing_ratio_type
+                               !   water_species, mixing_ratio_type,
+                               !   water_tracer, prescribed_ratio
   procedure :: deallocate
 
 Getters (subset)
@@ -1310,6 +1396,9 @@ Getters (subset)
   procedure :: is_advected
   procedure :: is_thermo_active
   procedure :: is_water_species
+  procedure :: is_water_tracer            ! NEW 2026-09-08 (§4.19)
+  procedure :: bulk_water_index           ! NEW 2026-09-08 (function, not subroutine)
+  procedure :: prescribed_ratio           ! NEW 2026-09-08 (§4.19)
   procedure :: is_mass_mixing_ratio
   procedure :: is_volume_mixing_ratio
   procedure :: is_number_concentration
@@ -1322,6 +1411,7 @@ Getters (subset)
 
 Setters (changes after instantiate)
   procedure :: set_const_index
+  procedure :: set_bulk_water_index       ! NEW 2026-09-08 (write-once, §4.19)
   procedure :: set_thermo_active
   procedure :: set_water_species
   procedure :: set_minimum
@@ -1334,7 +1424,8 @@ Setters (changes after instantiate)
 
 Identity / equality
   procedure :: equivalent                 ! full equality
-  procedure :: is_match                   ! checks units + (class-B props ← too strict)
+  procedure :: is_match                   ! checks units + (class-B props ← too strict);
+                                          !   7 attributes since 2026-09-08, see §4.3
 ```
 
 `ccpp_constituent_prop_ptr_t` is the pointer wrapper. Has parallel
