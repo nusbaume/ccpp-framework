@@ -16,7 +16,9 @@ module ccpp_constituent_prop_mod
   !!           need to have output variables.
 
   ! Private module data
-  integer, parameter :: stdname_len = 256
+  ! stdname_len is public so that host code (and generated host caps) can
+  !    size a buffer for the %standard_name(...) getter without guessing
+  integer, public, parameter :: stdname_len = 256
   integer, parameter :: dimname_len = 32
   integer, parameter :: errmsg_len = 256
   integer, parameter :: dry_mixing_ratio = -2

@@ -515,7 +515,107 @@ full constituent array containing only those flagged `advected=.true.`.
 ### `ccpp_model_const_properties(instance_number) result(const_ptr)`
 
 Returns `type(ccpp_constituent_prop_ptr_t), pointer :: const_ptr(:)` →
-`obj(instance_number)%constituent_props_ptr()`.
+`obj(instance_number)%constituent_props_ptr()`.  **Post-lock only** — the
+table must already have been built by `ccpp_register_constituents`.  For
+the register phase, see `ccpp_scheme_const_properties` below.
+
+### `ccpp_scheme_const_properties(suite_name, const_props, instance_number, errcode, errmsg)`
+
+| Arg | Direction / Type | Purpose |
+|---|---|---|
+| `suite_name` | `character(len=*), intent(in)` | Which suite to report on |
+| `const_props` | `type(ccpp_constituent_properties_t), allocatable, intent(out) :: (:)` | Copy of the constituents that suite's register phase declared |
+| `instance_number` | `integer, intent(in)` | |
+| `errcode` / `errmsg` | `intent(out)` | |
+
+**The host's view of the register phase.**  Valid in exactly one window:
+after `ccpp_register` has run a suite's register phase, and before
+`ccpp_register_constituents` builds and locks the table.  That is the last
+moment at which the host can still decide to declare more constituents, so
+this is what lets a host react to what the physics asked for — for example,
+adding a water tracer for each water species a scheme registered.
+
+One suite per call, dispatched by name exactly as `ccpp_register` is, so it
+rides the loop the host already writes.  Unknown names are an **error**, not
+an empty answer — a typo must not read as "this suite registered nothing".
+A known suite whose register phase declares no constituents returns a
+**zero-size** array with `errcode == 0`.
+
+Do not confuse this with `ccpp_is_scheme_constituent`, which does **not**
+answer this question: that routine tests `ccpp_model_const_stdnames`, a
+*code-generation-time* list holding only the names that needed an
+`index_of_<X>` integer.  `ccpp_scheme_const_properties` reports what was
+actually registered at run time.
+
+Notes:
+
+- **Verbatim, in registration order.**  Nothing is collapsed or reordered.
+  Two suites may legitimately register the same constituent, so a host that
+  treats the union across suites as a species list must dedup it itself.
+- **Copies, not pointers.**  The intended use is to grow the host's own
+  `host_constituents(:)` array and pass the whole thing to
+  `ccpp_register_constituents`; `ccpp_constituent_prop_ptr_t`'s `%prop`
+  component is private, so a constituent cannot be copied out of a pointer
+  wrapper.  Re-submitting the copies costs nothing — `%new_field` silently
+  ignores a re-add whose properties match.
+- **Writing to a copy does not override anything.**  The copies are
+  detached from the framework's objects.  Re-submitting a *modified* copy
+  under the same standard name is an incompatible duplicate and a hard
+  error, not a host-wins override.  See `constituents_overhaul.md` §4.3.
+- **Errors if the table is already locked** rather than returning a list
+  the host can no longer act on.  Use `ccpp_model_const_properties` for
+  the locked table.
+
+```fortran
+use <host>_ccpp_cap, only: ccpp_register, ccpp_scheme_const_properties, &
+                           ccpp_register_constituents
+use ccpp_constituent_prop_mod, only: ccpp_constituent_properties_t, stdname_len
+
+type(ccpp_constituent_properties_t), allocatable :: host_constituents(:)
+type(ccpp_constituent_properties_t), allocatable :: suite_props(:)
+type(ccpp_constituent_properties_t), allocatable :: my_tracers(:)
+character(len=stdname_len) :: sname
+logical :: is_water
+integer :: i, s, ntracer
+
+allocate(my_tracers(max_tracers))
+ntracer = 0
+
+do s = 1, num_suites
+  call ccpp_register(suite_names(s), errmsg, errcode, inst)
+  if (errcode /= 0) return
+
+  ! What did this suite's schemes ask for?
+  call ccpp_scheme_const_properties(suite_names(s), suite_props, inst, &
+                                    errcode, errmsg)
+  if (errcode /= 0) return
+
+  do i = 1, size(suite_props)
+    call suite_props(i)%is_water_species(is_water, errcode, errmsg)
+    if (.not. is_water) cycle
+    call suite_props(i)%standard_name(sname, errcode, errmsg)
+    if (already_tracked(sname)) cycle   ! two suites may register the same one
+    ntracer = ntracer + 1
+    call my_tracers(ntracer)%instantiate(                          &
+        std_name='tracer_of_' // trim(sname),                      &
+        long_name='water tracer of ' // trim(sname),               &
+        diag_name='TR_' // trim(sname), units='kg kg-1',           &
+        vertical_dim='vertical_layer_dimension', advected=.true.,  &
+        water_tracer=.true., errcode=errcode, errmsg=errmsg)
+  end do
+  deallocate(suite_props)
+end do
+
+! Hand over the host's own declarations, exactly as before.
+allocate(host_constituents(0))
+host_constituents = [host_constituents, my_tracers(1:ntracer)]
+call ccpp_register_constituents(host_constituents, inst, errcode, errmsg)
+```
+
+The bulk-water index each tracer tracks is not knowable here — constituent
+indices do not exist until the table is locked.  Set it after
+`ccpp_initialize_constituents`, via `%set_bulk_water_index` on the entry
+from `ccpp_model_const_properties`.
 
 ### `ccpp_deallocate_dynamic_constituents(instance_number)`
 
@@ -566,6 +666,7 @@ module ccpp_host_constituents
   public :: ccpp_register_constituents
   public :: ccpp_initialize_constituents
   public :: ccpp_is_scheme_constituent
+  public :: ccpp_scheme_const_properties
   public :: ccpp_number_constituents
   public :: ccpp_gather_constituents
   public :: ccpp_update_constituents
@@ -1012,7 +1113,8 @@ module ccpp_host_constituents
   public :: ccpp_model_constituents_obj
   public :: index_of_cloud_liquid_water_mixing_ratio
   public :: ccpp_register_constituents, ccpp_initialize_constituents
-  public :: ccpp_is_scheme_constituent, ccpp_number_constituents
+  public :: ccpp_is_scheme_constituent, ccpp_scheme_const_properties
+  public :: ccpp_number_constituents
   public :: ccpp_gather_constituents, ccpp_update_constituents
   public :: ccpp_const_get_index, ccpp_constituents_array
   public :: ccpp_advected_constituents_array, ccpp_model_const_properties

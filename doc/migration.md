@@ -1045,7 +1045,16 @@ the buffer from creation — no ownership transfer call needed.
   - `ccpp_model_const_properties(instance_number) → pointer`
   - `ccpp_number_constituents(num_flds, advected, instance_number, ...)`
   - `ccpp_gather_constituents`, `ccpp_update_constituents`
-  - `ccpp_is_scheme_constituent(var_name, ...)` (not per-instance)
+  - `ccpp_is_scheme_constituent(var_name, ...)` (not per-instance) —
+    answers from the *code-generation-time* std-name list, not from what
+    was registered at run time
+  - `ccpp_scheme_const_properties(suite_name, const_props,
+    instance_number, ...)` — copies of what one suite's register phase
+    declared, queryable only between `ccpp_register` and
+    `ccpp_register_constituents`; the host's chance to react before the
+    table is locked.  Dispatches by suite name like `ccpp_register`, so it
+    rides the same loop.  Has no original-capgen equivalent
+    (`constituents.md`)
 - Scheme-side registration rules — register-phase
   `ccpp_constituent_properties_t(:)` arg declares new constituents;
   flag a base species with `advected=true intent=in/inout`; produce a

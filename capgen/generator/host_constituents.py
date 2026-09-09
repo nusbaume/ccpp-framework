@@ -474,6 +474,163 @@ def _accessor_functions(host_dict) -> List[str]:
     return lines
 
 
+def _scheme_const_properties_lines(
+    suite_results: List[SuiteResolution],
+    host_dict,
+) -> List[str]:
+    """Emit ``ccpp_scheme_const_properties``.
+
+    The host-facing window into the register phase.  Between
+    ``ccpp_register`` and ``ccpp_register_constituents`` the scheme-
+    registered constituents live only in the per-suite
+    ``<suite>_dynamic_constituents(inst)%items(:)`` buffers, which are
+    module state the host has no supported way to read -- and
+    ``ccpp_is_scheme_constituent`` does not answer this question, since it
+    tests ``ccpp_model_const_stdnames``, a *codegen-time* list holding only
+    the names that needed an ``index_of_<X>``.
+
+    One suite per call, dispatched by ``suite_name`` exactly as
+    ``ccpp_register`` does -- same ``select case(trim(...))``, same
+    unknown-suite error.  The host already loops over its suites to call
+    ``ccpp_register``; this rides that loop.
+
+    Returns a **copy** of the suite's register-phase constituents, in
+    registration order, verbatim: nothing is collapsed or reordered.  A
+    host treating the union across suites as a species list must dedup it
+    (two suites may legitimately register the same constituent).  Copies
+    rather than ``ccpp_constituent_prop_ptr_t`` pointers because the
+    intended use is to grow the host's own ``host_constituents(:)`` array
+    with the result and pass the whole thing to
+    ``ccpp_register_constituents``: the pointer wrapper's ``%prop``
+    component is private, so a host cannot copy a constituent out of one.
+    Re-submitting the copies is free -- ``ccpp_model_constituents_t%new_field``
+    silently ignores a re-add whose properties match
+    (``ccp_model_const_add_metadata``).
+
+    Note what this does NOT provide: the copies are detached, so writing to
+    one does not override what a scheme registered.  Resubmitting a
+    *modified* copy under the same standard name is an incompatible
+    duplicate and a hard error, not a host-wins override -- see
+    ``constituents_overhaul.md`` §4.3.
+    """
+    i1 = _INDENT
+    i2 = _INDENT * 2
+    i3 = _INDENT * 3
+    i4 = _INDENT * 4
+    i5 = _INDENT * 5
+    register_suites = _suites_with_register_consts(suite_results)
+    all_suites = [sr.suite_name for sr in suite_results]
+    inst_local, _ = _host_lookup(host_dict, 'instance_number')
+    inst_idx = inst_local if inst_local else '1'
+
+    sig = _instance_signature(['suite_name', 'const_props'], inst_local)
+    lines: List[str] = ['']
+    lines.append('{}subroutine ccpp_scheme_const_properties({})'.format(
+        i1, ', '.join(sig),
+    ))
+    lines.append('')
+    lines.append('{}character(len=*), intent(in) :: suite_name'.format(i2))
+    lines.append(
+        '{}type({}), allocatable, intent(out) :: const_props(:)'.format(
+            i2, _CONST_PROP_TYPE,
+        )
+    )
+    if inst_local:
+        lines.append('{}integer, intent(in) :: {}'.format(i2, inst_local))
+    lines.append('{}integer, intent(out) :: errcode'.format(i2))
+    lines.append('{}character(len=*), intent(out) :: errmsg'.format(i2))
+    lines.append('')
+    if register_suites:
+        lines.append('{}integer :: num_consts, index'.format(i2))
+        lines.append('')
+    lines.append("{}errmsg = ''".format(i2))
+    lines.append('{}errcode = 0'.format(i2))
+    lines.append('')
+
+    # Guard: called too late.  Once the table is locked the answer can no
+    # longer be acted on, so say so rather than hand back a list the host
+    # cannot use.  ccpp_model_const_properties() is the post-lock accessor.
+    if register_suites:
+        lines.append(
+            '{}! Too late?  Once the properties table is locked the host can no'.format(i2)
+        )
+        lines.append(
+            '{}!   longer add constituents, so an answer here would mislead.'.format(i2)
+        )
+        lines.append('{}if (allocated({})) then'.format(i2, _CONST_OBJ))
+        lines.append('{}if (size({}, 1) >= {}) then'.format(
+            i3, _CONST_OBJ, inst_idx,
+        ))
+        lines.append('{}if ({}({})%const_props_locked()) then'.format(
+            i4, _CONST_OBJ, inst_idx,
+        ))
+        lines.append('{}errcode = 1'.format(i5))
+        lines.append(
+            "{}errmsg = 'ccpp_scheme_const_properties: constituent '// &".format(i5)
+        )
+        lines.append(
+            "{}    'properties are already locked.  Call between '// &".format(i5)
+        )
+        lines.append(
+            "{}    'ccpp_register and ccpp_register_constituents, or '// &".format(i5)
+        )
+        lines.append(
+            "{}    'use ccpp_model_const_properties for the locked table.'".format(i5)
+        )
+        lines.append('{}return'.format(i5))
+        lines.append('{}end if'.format(i4))
+        lines.append('{}end if'.format(i3))
+        lines.append('{}end if'.format(i2))
+        lines.append('')
+
+    # Dispatch on suite name, mirroring ccpp_register.  Every suite gets a
+    # case: one that declares no register-phase constituents answers zero
+    # rather than falling through to the unknown-suite error.
+    lines.append('{}select case(trim(suite_name))'.format(i2))
+    for sname in all_suites:
+        lines.append("{}case('{}')".format(i2, sname))
+        if sname in register_suites:
+            buf = _dyn_const_array_name(sname)
+            lines.append('{}num_consts = 0'.format(i3))
+            lines.append('{}if (allocated({})) then'.format(i3, buf))
+            lines.append('{}if (allocated({}({})%items)) then'.format(
+                i4, buf, inst_idx,
+            ))
+            lines.append('{}num_consts = size({}({})%items, 1)'.format(
+                i5, buf, inst_idx,
+            ))
+            lines.append('{}end if'.format(i4))
+            lines.append('{}end if'.format(i3))
+            # Element-wise copy so the scalar defined assignment
+            # (copyconstituent) runs -- it is not elemental, so an
+            # array-valued assignment would silently fall back to
+            # intrinsic assignment.
+            lines.append('{}allocate(const_props(num_consts))'.format(i3))
+            lines.append('{}do index = 1, num_consts'.format(i3))
+            lines.append('{}const_props(index) = {}({})%items(index)'.format(
+                i4, buf, inst_idx,
+            ))
+            lines.append('{}end do'.format(i3))
+        else:
+            lines.append(
+                '{}! No register-phase scheme in this suite declares a'.format(i3)
+            )
+            lines.append(
+                '{}!   constituent.  Zero is the answer, not an error.'.format(i3)
+            )
+            lines.append('{}allocate(const_props(0))'.format(i3))
+    lines.append('{}case default'.format(i2))
+    lines.append('{}errcode = 1'.format(i3))
+    lines.append(
+        "{}errmsg = 'ccpp_scheme_const_properties: unknown suite: '// &".format(i3)
+    )
+    lines.append('{}    trim(suite_name)'.format(i3))
+    lines.append('{}end select'.format(i2))
+    lines.append('')
+    lines.append('{}end subroutine ccpp_scheme_const_properties'.format(i1))
+    return lines
+
+
 def _deallocate_lines(
     suite_results: List[SuiteResolution],
     host_dict,
@@ -611,6 +768,7 @@ def _generate_host_constituents(
         'ccpp_register_constituents',
         'ccpp_initialize_constituents',
         'ccpp_is_scheme_constituent',
+        'ccpp_scheme_const_properties',
         'ccpp_number_constituents',
         'ccpp_gather_constituents',
         'ccpp_update_constituents',
@@ -691,6 +849,7 @@ def _generate_host_constituents(
     lines.extend(_register_constituents_lines(suite_results, host_dict))
     lines.extend(_initialize_constituents_lines(suite_results, host_dict))
     lines.extend(_is_scheme_constituent_lines(suite_results))
+    lines.extend(_scheme_const_properties_lines(suite_results, host_dict))
     lines.extend(_wrap_method_subs(host_dict))
     lines.extend(_accessor_functions(host_dict))
     lines.extend(_deallocate_lines(suite_results, host_dict))

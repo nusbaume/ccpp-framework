@@ -113,6 +113,9 @@ class TestGenerateHostCapModule(unittest.TestCase):
         self.assertIn('public :: ccpp_initialize_constituents', self.text)
         self.assertIn('public :: ccpp_constituents_array', self.text)
         self.assertIn('public :: ccpp_model_const_properties', self.text)
+        # The register-phase query: the host's only supported view of what
+        # schemes registered, before the table is built and locked.
+        self.assertIn('public :: ccpp_scheme_const_properties', self.text)
 
 
 class TestHostCapConstituentReexport(unittest.TestCase):
@@ -142,6 +145,7 @@ class TestHostCapConstituentReexport(unittest.TestCase):
             'ccpp_register_constituents',
             'ccpp_initialize_constituents',
             'ccpp_is_scheme_constituent',
+            'ccpp_scheme_const_properties',
             'ccpp_number_constituents',
             'ccpp_gather_constituents',
             'ccpp_update_constituents',
