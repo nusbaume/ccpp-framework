@@ -1016,6 +1016,60 @@ construction.
 
 ---
 
+### 4.20 Capgen: the register phase is now visible to the host (ADDED 2026-09-08)
+
+- **What was missing**: between `ccpp_register` and
+  `ccpp_register_constituents` the scheme-registered constituents exist
+  only in the per-suite `<suite>_dynamic_constituents(inst)%items(:)`
+  buffers (`capgen/generator/suite_cap.py`).  Those buffers were `public`
+  from `ccpp_host_constituents`, but their wrapper type
+  `ccpp_dyn_const_buffer_t` is private and they were not re-exported
+  through `<host>_ccpp_cap`, so a host had no supported way to read them —
+  and the symbol only exists for suites that happen to have register-phase
+  producers, so even reaching for it directly is not portable.
+  `ccpp_is_scheme_constituent` looks like the answer and is not: it tests
+  `ccpp_model_const_stdnames`, a codegen-time list holding only the names
+  that needed an `index_of_<X>`.  That left the host's last chance to
+  declare a constituent — the moment before `lock_table` — as the one
+  point in the lifecycle it could not see.
+- **What landed**: `ccpp_scheme_const_properties(suite_name, const_props[,
+  inst], errcode, errmsg)`, generated into `ccpp_host_constituents` and
+  re-exported through the host cap
+  (`capgen/generator/host_constituents.py`, `host_cap.py`).  Returns a
+  **copy** of one suite's register-phase constituents, verbatim and in
+  registration order.  Reference and worked example in `constituents.md`.
+- **Why per-suite rather than one aggregated list** (decided 2026-09-08,
+  after an aggregated-and-deduplicated first cut): the host already loops
+  over its suites to call `ccpp_register`, so this rides that loop and
+  reuses its `select case(trim(suite_name))` dispatch and unknown-suite
+  error verbatim — one convention, not two.  It also keeps the routine a
+  faithful window rather than an interpretation: collapsing a constituent
+  that two suites both registered is a policy decision, and with per-suite
+  calls that decision stays with the host, the only party that knows
+  whether the union is meant to be a species list.  A known suite that
+  registers nothing answers zero rather than erroring, so the host's loop
+  needs no special-casing; an unknown name *is* an error, so a typo cannot
+  read as "this suite registered nothing".
+- **Why copies rather than `ccpp_constituent_prop_ptr_t`**: the intended
+  use is to grow the host's own `host_constituents(:)` with the result and
+  hand the whole thing to `ccpp_register_constituents`; `%prop` is a
+  private component, so a constituent cannot be copied out of a pointer
+  wrapper.  Re-submitting the copies is free — `new_field` silently
+  ignores a matching re-add.  `stdname_len` was made public in the same
+  change so a caller can size a `%standard_name` buffer from the real
+  parameter instead of hardcoding 256.
+- **What it deliberately does not do**: override.  The copies are
+  detached, and resubmitting a *modified* copy under the same standard
+  name is an incompatible duplicate — a hard error, not host-wins.  A
+  pointer-returning variant would make override possible and is the
+  obvious follow-on if §4.3 relaxes `is_match`; it was left out rather
+  than shipped as a second way to do the same thing.
+- **Position relative to §4.16**: complementary, not a fix.  §4.16 is
+  about *codegen* being blind to register-phase constituents; this makes
+  the *host* sighted at run time.  Closing FU-002 would address §4.16.
+
+---
+
 ## 5. Property classification (Class A vs Class B)
 
 Proposed 2026-05-12.  (The original write-up lived in an auto-memory

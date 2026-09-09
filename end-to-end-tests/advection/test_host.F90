@@ -140,6 +140,7 @@ contains
 
     use ccpp_constituent_prop_mod, only: ccpp_constituent_prop_ptr_t
     use ccpp_constituent_prop_mod, only: int_unassigned, kphys_unassigned
+    use ccpp_constituent_prop_mod, only: stdname_len
     use test_host_mod, only: num_time_steps
     use test_host_mod, only: init_data, &
         compare_data
@@ -165,6 +166,7 @@ contains
     use test_host_ccpp_cap, only: ccpp_final
     use test_host_ccpp_cap, only: ccpp_physics_suite_list
     use test_host_ccpp_cap, only: ccpp_const_get_index
+    use test_host_ccpp_cap, only: ccpp_scheme_const_properties
     use test_host_ccpp_cap, only: ccpp_model_const_properties
     use test_utils, only: check_list
 
@@ -186,6 +188,18 @@ contains
     integer :: test_const_indices(num_consts)
     integer :: check_index
     type(ccpp_constituent_properties_t) :: test_water_tracer
+    integer :: iq, jq, n_found
+    logical :: q_water_tracer
+    real(kind=kind_phys) :: q_ratio
+    character(len=stdname_len) :: qname, qname2
+    type(ccpp_constituent_properties_t), allocatable :: scheme_props(:)
+    type(ccpp_constituent_properties_t), allocatable :: suite_props(:)
+    ! Every constituent declared by a register-phase scheme in cld_suite
+    character(len=44), parameter :: expected_scheme_consts(4) = [ &
+        character(len=44) :: 'dyn_const1', &
+        'dyn_const2_wrt_moist_air', &
+        'dyn_const3_wrt_moist_air_and_condensed_water', &
+        'cloud_liquid_dry_mixing_ratio']
     character(len=128), allocatable :: suite_names(:)
     character(len=256) :: const_str
     character(len=512) :: errmsg
@@ -318,6 +332,113 @@ contains
         end if
       end if
     end do
+
+    ! ------------------------------------------------------------------
+    ! Register-phase constituent query
+    ! ------------------------------------------------------------------
+    ! ccpp_scheme_const_properties is only meaningful in this window:
+    ! after ccpp_register has run every scheme's register phase, and
+    ! before ccpp_register_constituents builds and locks the table.
+    ! One suite per call, dispatched by name exactly like ccpp_register,
+    ! so this rides the same loop the host already writes.
+    allocate(scheme_props(0))
+    do sind = 1, num_suites
+      call ccpp_scheme_const_properties(test_suites(sind)%suite_name, &
+          suite_props, errcode, errmsg)
+      if (errcode /= 0) then
+        write(6, '(a,i0,4a)') "ERROR: Error, ", errcode, &
+            " calling ccpp_scheme_const_properties for suite '", &
+            trim(test_suites(sind)%suite_name), "': ", trim(errmsg)
+        errcode_final = -1 ! Notify test script that a failure occurred
+        errcode = 0
+        cycle
+      end if
+      ! Accumulate across suites.  The routine returns one suite verbatim,
+      ! so collapsing a constituent two suites both registered is the
+      ! host's job -- this corpus has a single suite, so there is nothing
+      ! to collapse and a plain append is the whole of it.
+      scheme_props = [scheme_props, suite_props]
+      deallocate(suite_props)
+    end do
+
+    ! Every register-phase constituent must be present exactly once.
+    do iq = 1, size(expected_scheme_consts)
+      n_found = 0
+      do jq = 1, size(scheme_props)
+        call scheme_props(jq)%standard_name(qname, errcode, errmsg)
+        if (errcode /= 0) exit
+        if (trim(qname) == trim(expected_scheme_consts(iq))) then
+          n_found = n_found + 1
+        end if
+      end do
+      if (errcode /= 0) then
+        write(6, '(a,i0,2a)') "ERROR: Error, ", errcode, &
+            " reading a queried standard name: ", trim(errmsg)
+        errcode_final = -1 ! Notify test script that a failure occurred
+        errcode = 0
+        exit
+      end if
+      if (n_found /= 1) then
+        write(6, *) "ERROR: ccpp_scheme_const_properties returned ", &
+            n_found, " entries for '", trim(expected_scheme_consts(iq)), &
+            "', expected exactly 1."
+        errcode_final = -1 ! Notify test script that a failure occurred
+      end if
+    end do
+
+    ! A host constituent is not a scheme constituent: specific_humidity is
+    ! declared below, by this host, and must not come back here.
+    do jq = 1, size(scheme_props)
+      call scheme_props(jq)%standard_name(qname, errcode, errmsg)
+      if (errcode /= 0) then
+        errcode = 0
+        cycle
+      end if
+      if (trim(qname) == 'specific_humidity') then
+        write(6, *) "ERROR: ccpp_scheme_const_properties returned host ", &
+            "constituent 'specific_humidity'; it must return only ", &
+            "register-phase scheme constituents."
+        errcode_final = -1 ! Notify test script that a failure occurred
+      end if
+    end do
+
+    ! The returned entries are full copies, not just names: dyn_const1 was
+    ! registered as a water tracer with a prescribed ratio of 0.5.
+    do jq = 1, size(scheme_props)
+      call scheme_props(jq)%standard_name(qname, errcode, errmsg)
+      if (errcode /= 0) then
+        errcode = 0
+        cycle
+      end if
+      if (trim(qname) /= 'dyn_const1') then
+        cycle
+      end if
+      call scheme_props(jq)%is_water_tracer(q_water_tracer, errcode, errmsg)
+      call scheme_props(jq)%prescribed_ratio(q_ratio, errcode, errmsg)
+      if (errcode /= 0) then
+        write(6, '(a,i0,2a)') "ERROR: Error, ", errcode, &
+            " reading queried water-tracer properties: ", trim(errmsg)
+        errcode_final = -1 ! Notify test script that a failure occurred
+        errcode = 0
+      else if ((.not. q_water_tracer) .or. (q_ratio /= 0.5_kind_phys)) then
+        write(6, *) "ERROR: the queried copy of dyn_const1 lost its ", &
+            "water-tracer properties; copyconstituent is incomplete."
+        errcode_final = -1 ! Notify test script that a failure occurred
+      end if
+    end do
+
+    ! An unrecognised suite name must be an error, not a silent empty
+    ! answer -- a typo would otherwise look like "no constituents".
+    call ccpp_scheme_const_properties('no_such_suite', suite_props, &
+        errcode, errmsg)
+    if (errcode == 0) then
+      write(6, *) "ERROR: ccpp_scheme_const_properties should reject an ", &
+          "unknown suite name."
+      errcode_final = -1 ! Notify test script that a failure occurred
+    end if
+    errcode = 0
+    if (allocated(suite_props)) deallocate(suite_props)
+    ! -------------------
     allocate(host_constituents(3))
     call host_constituents(1)%instantiate(std_name="specific_humidity", &
         long_name="Specific humidity", diag_name='H2O', units="kg kg-1", &
@@ -341,6 +462,17 @@ contains
         mixing_ratio_type='dry',                             &
         errcode=errcode, errmsg=errmsg)
 
+    ! Exercise the documented workflow: grow the host's own array with the
+    ! queried copies and hand the whole thing to ccpp_register_constituents.
+    ! The re-submitted copies dedup silently against the suite buffers
+    ! (new_field ignores a matching re-add), so the resulting constituent
+    ! table is exactly what it would have been without them -- every count
+    ! and index checked below is unchanged.
+    if (allocated(scheme_props)) then
+      host_constituents = [host_constituents, scheme_props]
+      deallocate(scheme_props)
+    end if
+
     call check_errcode(subname // '.initialize', errcode, errmsg, errcode_final)
     if (errcode == 0) then
       call ccpp_register_constituents(host_constituents, &
@@ -351,6 +483,18 @@ contains
       retval = .false.
       return
     end if
+    ! The query must refuse once the table is locked rather than hand back
+    ! a list the host can no longer act on.
+    call ccpp_scheme_const_properties(test_suites(1)%suite_name, &
+        suite_props, errcode, errmsg)
+    if (errcode == 0) then
+      write(6, *) "ERROR: ccpp_scheme_const_properties should fail once ", &
+          "the constituent properties table is locked."
+      errcode_final = -1 ! Notify test script that a failure occurred
+    end if
+    errcode = 0
+    if (allocated(suite_props)) deallocate(suite_props)
+
     ! Check number of advected constituents
     if (errcode == 0) then
       call ccpp_number_constituents(num_advected, errmsg=errmsg, &

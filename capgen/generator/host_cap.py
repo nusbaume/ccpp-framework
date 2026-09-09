@@ -1054,6 +1054,7 @@ def _generate_host_cap(
         'ccpp_register_constituents',
         'ccpp_initialize_constituents',
         'ccpp_is_scheme_constituent',
+        'ccpp_scheme_const_properties',
         'ccpp_number_constituents',
         'ccpp_gather_constituents',
         'ccpp_update_constituents',

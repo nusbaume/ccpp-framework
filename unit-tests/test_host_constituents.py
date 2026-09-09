@@ -139,6 +139,7 @@ class TestModuleEmittedWhenNoConstituents(unittest.TestCase):
                     'ccpp_register_constituents',
                     'ccpp_initialize_constituents',
                     'ccpp_is_scheme_constituent',
+                    'ccpp_scheme_const_properties',
                     'ccpp_number_constituents',
                     'ccpp_gather_constituents',
                     'ccpp_update_constituents',
@@ -695,6 +696,185 @@ class TestAccessorFunctions(unittest.TestCase):
             '%constituent_props_ptr()',
             self.text,
         )
+
+
+def _extract_scheme_const_properties(text):
+    """Return just the ``ccpp_scheme_const_properties`` subroutine body.
+
+    Assertions about local declarations have to be scoped to the routine:
+    ``ccpp_register_constituents`` declares an identically-spelled
+    ``integer :: num_consts, index``.
+    """
+    import re
+    match = re.search(
+        r'  subroutine ccpp_scheme_const_properties.*?'
+        r'end subroutine ccpp_scheme_const_properties',
+        text, re.S,
+    )
+    assert match is not None, 'ccpp_scheme_const_properties was not emitted'
+    return match.group(0)
+
+
+class TestSchemeConstPropertiesRoutine(unittest.TestCase):
+    """``ccpp_scheme_const_properties`` -- the register-phase query.
+
+    The window it serves is between ``ccpp_register`` (which fills the
+    per-suite ``<suite>_dynamic_constituents`` buffers) and
+    ``ccpp_register_constituents`` (which builds and locks the table).
+    Note that ``ccpp_is_scheme_constituent`` does NOT answer this: it tests
+    ``ccpp_model_const_stdnames``, a codegen-time list holding only names
+    that needed an ``index_of_<X>``.
+    """
+
+    def setUp(self):
+        self.text = _render_register()
+
+    def test_subroutine_signature(self):
+        # suite_name first, mirroring ccpp_register / ccpp_init.
+        self.assertIn(
+            'subroutine ccpp_scheme_const_properties(suite_name, '
+            'const_props, inst_num, errcode, errmsg)',
+            self.text,
+        )
+        self.assertIn('character(len=*), intent(in) :: suite_name', self.text)
+
+    def test_returns_allocatable_copies_not_pointers(self):
+        # Copies, so the host can grow host_constituents(:) with them --
+        # ccpp_constituent_prop_ptr_t's %prop component is private, so a
+        # pointer wrapper cannot be copied out of.
+        self.assertIn(
+            'type(ccpp_constituent_properties_t), allocatable, '
+            'intent(out) :: const_props(:)',
+            self.text,
+        )
+
+    def test_is_public(self):
+        self.assertIn('public :: ccpp_scheme_const_properties', self.text)
+
+    def test_dispatches_on_suite_name_like_ccpp_register(self):
+        self.assertIn('select case(trim(suite_name))', self.text)
+        self.assertIn("case('reg_consts')", self.text)
+
+    def test_unknown_suite_is_an_error(self):
+        # A typo must not read as "this suite registered nothing".
+        self.assertIn(
+            "errmsg = 'ccpp_scheme_const_properties: unknown suite: '// &",
+            self.text,
+        )
+
+    def test_refuses_once_table_is_locked(self):
+        # Answering after lock would hand back a list the host can no
+        # longer act on; ccpp_model_const_properties is the post-lock API.
+        self.assertIn(
+            'if (ccpp_model_constituents_obj(inst_num)%const_props_locked()) then',
+            self.text,
+        )
+        self.assertIn('properties are already locked.', self.text)
+
+    def test_lock_guard_is_bounds_safe(self):
+        # The object array may be allocated with fewer slots than the
+        # requested instance; check before subscripting it.
+        self.assertIn(
+            'if (size(ccpp_model_constituents_obj, 1) >= inst_num) then',
+            self.text,
+        )
+
+    def test_copies_the_suite_buffer_verbatim(self):
+        # Registration order, nothing collapsed or reordered.
+        self.assertIn(
+            'num_consts = size(reg_consts_dynamic_constituents(inst_num)%items, 1)',
+            self.text,
+        )
+        self.assertIn('allocate(const_props(num_consts))', self.text)
+        self.assertIn(
+            'const_props(index) = '
+            'reg_consts_dynamic_constituents(inst_num)%items(index)',
+            self.text,
+        )
+
+    def test_copy_is_element_wise(self):
+        # copyconstituent is NOT elemental, so an array-valued assignment
+        # would silently fall back to intrinsic assignment.
+        self.assertIn('do index = 1, num_consts', self.text)
+
+    def test_no_dedup_machinery(self):
+        # One suite per call: collapsing a name two suites both registered
+        # is the host's job, so nothing here scans for duplicates.
+        routine = _extract_scheme_const_properties(self.text)
+        self.assertNotIn('is_dup', routine)
+        self.assertNotIn('num_kept', routine)
+
+
+class TestSchemeConstPropertiesMultiSuite(unittest.TestCase):
+    """Every suite gets a case, whether or not it has a buffer."""
+
+    def setUp(self):
+        import copy
+        suite_resolution, hd = _resolve_register()
+        with_buffer = copy.deepcopy(suite_resolution)
+        with_buffer.suite_name = 'other_suite'
+        # A suite whose register phase declares no constituents still needs
+        # a case -- otherwise a legitimate name falls through to the
+        # unknown-suite error.
+        no_buffer = copy.deepcopy(suite_resolution)
+        no_buffer.suite_name = 'bare_suite'
+        no_buffer.constituent_register_calls = []
+        self.text = '\n'.join(_generate_host_constituents(
+            [suite_resolution, with_buffer, no_buffer], host_dict=hd,
+        ))
+
+    def test_every_suite_has_a_case(self):
+        for sname in ('reg_consts', 'other_suite', 'bare_suite'):
+            self.assertIn("case('{}')".format(sname), self.text)
+
+    def test_suites_with_buffers_copy_from_their_own(self):
+        for buf in ('reg_consts_dynamic_constituents',
+                    'other_suite_dynamic_constituents'):
+            self.assertIn(
+                'const_props(index) = {}(inst_num)%items(index)'.format(buf),
+                self.text,
+            )
+
+    def test_suite_without_constituents_answers_zero_not_error(self):
+        self.assertNotIn('bare_suite_dynamic_constituents', self.text)
+        self.assertIn('allocate(const_props(0))', self.text)
+
+
+class TestSchemeConstPropertiesNoRegisterSuites(unittest.TestCase):
+    """With no register-phase constituents anywhere, the routine still
+    exists and answers zero for a known suite.
+
+    The host cap's interface must not expand and contract with suite
+    content -- "no constituents" is an answer, not a missing symbol
+    (see ``_generate_host_constituents``).
+    """
+
+    def setUp(self):
+        suite_resolution, _hd = _resolve_simple()
+        self.suite_name = suite_resolution.suite_name
+        self.text = '\n'.join(_generate_host_constituents([suite_resolution]))
+        self.routine = _extract_scheme_const_properties(self.text)
+
+    def test_symbol_still_emitted_and_public(self):
+        self.assertIn(
+            'subroutine ccpp_scheme_const_properties(suite_name, '
+            'const_props, errcode, errmsg)',
+            self.text,
+        )
+        self.assertIn('public :: ccpp_scheme_const_properties', self.text)
+
+    def test_known_suite_answers_zero_size(self):
+        self.assertIn("case('{}')".format(self.suite_name), self.text)
+        self.assertIn('allocate(const_props(0))', self.text)
+
+    def test_unknown_suite_still_errors(self):
+        self.assertIn('case default', self.text)
+        self.assertIn('unknown suite:', self.text)
+
+    def test_no_unused_locals(self):
+        # Nothing to copy, so the counters must not be declared *in this
+        # routine* (ccpp_register_constituents declares the same names).
+        self.assertNotIn('integer :: num_consts, index', self.routine)
 
 
 class TestDeallocateRoutine(unittest.TestCase):
