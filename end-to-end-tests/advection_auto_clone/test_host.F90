@@ -192,6 +192,7 @@ contains
     logical :: q_water_tracer
     real(kind=kind_phys) :: q_ratio
     character(len=stdname_len) :: qname, qname2
+    character(len=stdname_len) :: check_name
     type(ccpp_constituent_properties_t), allocatable :: scheme_props(:)
     type(ccpp_constituent_properties_t), allocatable :: suite_props(:)
     ! Every constituent declared by a register-phase scheme in cld_suite
@@ -403,7 +404,8 @@ contains
     end do
 
     ! The returned entries are full copies, not just names: dyn_const1 was
-    ! registered as a water tracer with a prescribed ratio of 0.5.
+    ! registered as a water tracer with a prescribed ratio of 0.5 and a
+    ! bulk water species of dyn_const2_wrt_moist_air.
     do jq = 1, size(scheme_props)
       call scheme_props(jq)%standard_name(qname, errcode, errmsg)
       if (errcode /= 0) then
@@ -415,12 +417,14 @@ contains
       end if
       call scheme_props(jq)%is_water_tracer(q_water_tracer, errcode, errmsg)
       call scheme_props(jq)%prescribed_ratio(q_ratio, errcode, errmsg)
+      call scheme_props(jq)%bulk_water_name(check_name, errcode, errmsg)
       if (errcode /= 0) then
         write(6, '(a,i0,2a)') "ERROR: Error, ", errcode, &
             " reading queried water-tracer properties: ", trim(errmsg)
         errcode_final = -1 ! Notify test script that a failure occurred
         errcode = 0
-      else if ((.not. q_water_tracer) .or. (q_ratio /= 0.5_kind_phys)) then
+      else if ((.not. q_water_tracer) .or. (q_ratio /= 0.5_kind_phys) .or. &
+          (trim(check_name) /= 'dyn_const2_wrt_moist_air')) then
         write(6, *) "ERROR: the queried copy of dyn_const1 lost its ", &
             "water-tracer properties; copyconstituent is incomplete."
         errcode_final = -1 ! Notify test script that a failure occurred
@@ -1132,6 +1136,24 @@ contains
       errcode = 0
     end if
 
+    call const_props(index_dyn2)%bulk_water_name(check_name, errcode, errmsg)
+    if (errcode /= 0) then
+      write(6, '(a,i0,a,a,i0,/,a)') "ERROR: Error, ", errcode, " trying ", &
+          "to get bulk_water_name prop for dyn_const2 index = ", &
+          index_dyn2, trim(errmsg)
+      errcode_final = -1 ! Notify test script that a failure occurred
+    end if
+    if (errcode == 0) then
+      if (len_trim(check_name) /= 0) then ! Should be unassigned
+        write(6, *) "ERROR: 'bulk_water_name' should default to an empty ", &
+            "string unless set at registration."
+        errcode_final = -1 ! Notify test script that a failure occured
+      end if
+    else
+      ! Reset error flag to continue testing other properties:
+      errcode = 0
+    end if
+
     call const_props(index_dyn2)%prescribed_ratio(check_value, errcode, errmsg)
     if (errcode /= 0) then
       write(6, '(a,i0,a,a,i0,/,a)') "ERROR: Error, ", errcode, " trying ", &
@@ -1181,6 +1203,26 @@ contains
       if (check_value /= 0.5_kind_phys) then ! Should now be one half
         write(6, *) "ERROR: 'prescribed_ratio=0.5 did not set", &
             " prescribed_ratio constituent property correctly"
+        errcode_final = -1 ! Notify test script that a failure occurred
+      end if
+    else
+      ! Reset error flag to continue testing other properties:
+      errcode = 0
+    end if
+
+    call const_props(index_dyn1)%bulk_water_name(check_name, errcode, errmsg)
+    if (errcode /= 0) then
+      write(6, '(a,i0,a,i0,/,a)') "ERROR: Error, ", errcode, &
+          "trying to get bulk_water_name prop for dyn_const1 index = ", &
+          index_dyn1, trim(errmsg)
+      errcode_final = -1 ! Notify test script that a failure occurred
+    end if
+    if (errcode == 0) then
+      ! Should now be the standard name of dyn_const1's bulk water species
+      if (trim(check_name) /= 'dyn_const2_wrt_moist_air') then
+        write(6, *) "ERROR: 'bulk_water_name' did not set the", &
+            " bulk_water_name constituent property correctly, got '", &
+            trim(check_name), "'"
         errcode_final = -1 ! Notify test script that a failure occurred
       end if
     else
@@ -1268,6 +1310,20 @@ contains
         prescribed_ratio=0.5_kind_phys, errcode=errcode, errmsg=errmsg)
     if (errcode == 0) then
       write(6, *) "ERROR: 'prescribed_ratio' should not be settable for ", &
+          "a constituent which is not a water tracer."
+      errcode_final = -1 ! Notify test script that a failure occurred
+    end if
+    errcode = 0
+
+    ! Check that the bulk water name cannot be set for a constituent
+    ! which is not a water tracer:
+    call test_water_tracer%instantiate(std_name='not_a_water_tracer', &
+        long_name='not a water tracer', diag_name='NOTRACER', &
+        units='kg kg-1', vertical_dim='vertical_layer_dimension', &
+        bulk_water_name='dyn_const2_wrt_moist_air', errcode=errcode, &
+        errmsg=errmsg)
+    if (errcode == 0) then
+      write(6, *) "ERROR: 'bulk_water_name' should not be settable for ", &
           "a constituent which is not a water tracer."
       errcode_final = -1 ! Notify test script that a failure occurred
     end if

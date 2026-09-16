@@ -442,6 +442,7 @@ intentionally left for this discussion.
 | `mixing_ratio_type`| optional | **NO** | no |
 | `water_tracer`     | optional (default .false.) | **NO** | **yes** |
 | `prescribed_ratio` | optional (water tracers only) | **NO** | **yes** |
+| `bulk_water_name` | optional (water tracers only) | **NO** | **yes** |
 | `thermo_active`    | not in instantiate | `set_thermo_active` | **yes** |
 | `bulk_water_ind`   | not in instantiate | `set_bulk_water_index` (write-once) | **yes** |
 | `const_index`      | internal | `set_const_index` | no |
@@ -473,11 +474,15 @@ duplicate-dedup (host wins), not a hard error.
 
 **Got stricter, not looser, on 2026-09-08** (water-tracer properties,
 §4.19): `is_match` now also checks `water_tracer`, `bulk_water_ind` and
-`prescribed_ratio_val`, so it is 7 attributes, 6 of them host-owned.
+`prescribed_ratio_val`; `bulk_water_std_name` joined them on 2026-09-16,
+so it is 8 attributes, 7 of them host-owned.
 `bulk_water_ind` is the awkward one — it is *deliberately* set after the
 table is locked, so it always compares `int_unassigned == int_unassigned`
 at dedup time and the check can never fire.  Whatever relaxation this
 item lands on should drop that check rather than carry it.
+(`bulk_water_std_name` does **not** have that problem: it is set at
+registration, so two registrations that name different bulk species do
+compare unequal and the check fires.)
 
 ### 4.4 Framework: `diag_name` portability problem (OPEN)
 
@@ -978,22 +983,38 @@ construction.
 - **Added** 2026-09-08, ported from `origin/water_tracer_mods` commit
   `7d87ae4` ("Add first round of water tracer properties") onto
   `feature/capgen-v1`.
-- **What landed**: three properties on
+- **What landed**: four properties on
   `ccpp_constituent_properties_t` (`capgen/src/ccpp_constituent_prop_mod.F90`)
   plus their `ccpp_constituent_prop_ptr_t` delegates —
   `water_tracer` (logical, `%instantiate` arg + `is_water_tracer`),
   `prescribed_ratio_val` (real, `%instantiate` arg + `prescribed_ratio`),
-  and `bulk_water_ind` (integer, `set_bulk_water_index` +
-  `bulk_water_index`).  A water tracer is a constituent that tracks a
-  particular *bulk* water constituent; `prescribed_ratio` is the ratio it
-  is prescribed to hold against that bulk species.  Covered by the
-  `advection` / `advection_auto_clone` e2e hosts (`dyn_const1` is a water
-  tracer with `prescribed_ratio=0.5`).
+  `bulk_water_ind` (integer, `set_bulk_water_index` +
+  `bulk_water_index`), and — added 2026-09-16 —
+  `bulk_water_std_name` (deferred-length character, `%instantiate` arg
+  `bulk_water_name` + getter `bulk_water_name`).  A water tracer is a
+  constituent that tracks a particular *bulk* water constituent;
+  `prescribed_ratio` is the ratio it is prescribed to hold against that
+  bulk species, and `bulk_water_name` is that bulk species' **standard
+  name**.  Covered by the `advection` / `advection_auto_clone` e2e hosts
+  (`dyn_const1` is a water tracer with `prescribed_ratio=0.5` and
+  `bulk_water_name='dyn_const2_wrt_moist_air'`).
 - **Why `bulk_water_ind` has a setter but no `%instantiate` arg**: a
   constituent index is not knowable at register time, so the host sets it
   after the properties table is locked.  It is **write-once** — setting it
   twice, or setting it on a non-water-tracer, is an error.  This is the
   same "post-instantiate-only" shape as `thermo_active` (§4.2).
+- **Why `bulk_water_name` is the mirror image** (added 2026-09-16): it
+  names the same bulk species `bulk_water_ind` will eventually point at,
+  but a *standard name* **is** knowable at register time, so it is an
+  `%instantiate` arg with no setter.  It carries the same
+  water-tracers-only guard as `prescribed_ratio` — passing it for a
+  constituent registered with `water_tracer` unset is an error — and it
+  is stored lower-cased via `to_lower`, like `var_std_name`, so it
+  compares against the standard names the table is keyed on.  Unset, it
+  reads back as an empty string (the character analogue of
+  `int_unassigned` / `kphys_unassigned`).  Nothing in the framework
+  resolves it to an index; a host that wants `bulk_water_ind` still
+  looks the name up itself and calls `set_bulk_water_index`.
 - **The open question** — the source commit flags it in a `NOTE` comment
   on the type itself: all three are **quite specialized, and would be
   excellent candidates, along with their associated procedures, for being
@@ -1007,11 +1028,11 @@ construction.
   (`--legacy-auto-clone-constituents`, FU-012).  Its four extra metadata
   attributes (`default_value`, `min_value`, `water_species`,
   `mixing_ratio_type`) exist to reproduce what *original capgen* accepted;
-  `water_tracer` and `prescribed_ratio` never existed there, so adding
-  them would grow a transient shim with new functionality rather than
-  legacy parity.  A host wanting these declares them the capgen-v1 way —
+  `water_tracer`, `prescribed_ratio` and `bulk_water_name` never existed
+  there, so adding them would grow a transient shim with new
+  functionality rather than legacy parity.  A host wanting these declares them the capgen-v1 way —
   register-phase `%instantiate`, or `host_constituents(:)`.
-- **Consequence for §4.3**: `is_match` gained three more checks, one of
+- **Consequence for §4.3**: `is_match` gained four more checks, one of
   which (`bulk_water_ind`) can never fire.  See §4.3.
 
 ---
@@ -1103,6 +1124,7 @@ constituent property is conceptually owned by either the scheme
 | `water_tracer`    | (Fits neither cleanly — see §4.19 / Q9) Host-model-specialized. |
 | `prescribed_ratio`| (Fits neither cleanly — see §4.19 / Q9) Host-model-specialized. |
 | `bulk_water_ind`  | (Fits neither cleanly — see §4.19 / Q9) Host sets it post-lock. |
+| `bulk_water_name` | (Fits neither cleanly — see §4.19 / Q9) Host-model-specialized. |
 
 ### Consequences if adopted
 
@@ -1298,15 +1320,16 @@ These are the calls we need to make in the meeting.
 
 ### Q9. Should the water-tracer properties live in a host-extended type? (raised 2026-09-08, §4.19)
 
-`water_tracer`, `prescribed_ratio` and `bulk_water_ind` are the first
-properties on `ccpp_constituent_properties_t` that **no framework code
-path reads**.  They exist so one host's water-isotope / water-tagging
+`water_tracer`, `prescribed_ratio`, `bulk_water_ind` and
+`bulk_water_name` are the first properties on
+`ccpp_constituent_properties_t` that **no framework code path reads**.  They exist so one host's water-isotope / water-tagging
 configuration has somewhere to hang per-constituent state.  Options:
 
 - **Keep them on the core type** (what landed).  Cheapest for the host;
-  every other host and every scheme pays for three unused components,
-  three getters, one setter and three more `is_match` comparisons, and
-  the next specialized property has precedent to follow.
+  every other host and every scheme pays for four unused components,
+  four getters, one setter and four more `is_match` comparisons, and
+  the next specialized property has precedent to follow — as
+  `bulk_water_name` (2026-09-16) already demonstrates.
 - **Host-extended type** — the host declares
   `type, extends(ccpp_constituent_properties_t) :: my_const_props_t`
   and adds them there.  Requires that the framework store and return
@@ -1319,8 +1342,8 @@ configuration has somewhere to hang per-constituent state.  Options:
   compile-time names and types.
 
 Not independent of Q2/Q5: if `%instantiate` stops taking class-B args
-(Q5), `water_tracer`/`prescribed_ratio` lose their entry point and the
-answer is forced.
+(Q5), `water_tracer`/`prescribed_ratio`/`bulk_water_name` lose their
+entry point and the answer is forced.
 
 ---
 
@@ -1438,7 +1461,8 @@ Instantiation
                                !   units, vertical_dim, plus optional
                                !   advected, default_value, min_value, molar_mass,
                                !   water_species, mixing_ratio_type,
-                               !   water_tracer, prescribed_ratio
+                               !   water_tracer, prescribed_ratio,
+                               !   bulk_water_name
   procedure :: deallocate
 
 Getters (subset)
@@ -1451,6 +1475,7 @@ Getters (subset)
   procedure :: is_thermo_active
   procedure :: is_water_species
   procedure :: is_water_tracer            ! NEW 2026-09-08 (§4.19)
+  procedure :: bulk_water_name            ! NEW 2026-09-16 (§4.19)
   procedure :: bulk_water_index           ! NEW 2026-09-08 (function, not subroutine)
   procedure :: prescribed_ratio           ! NEW 2026-09-08 (§4.19)
   procedure :: is_mass_mixing_ratio

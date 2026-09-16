@@ -601,7 +601,8 @@ do s = 1, num_suites
         long_name='water tracer of ' // trim(sname),               &
         diag_name='TR_' // trim(sname), units='kg kg-1',           &
         vertical_dim='vertical_layer_dimension', advected=.true.,  &
-        water_tracer=.true., errcode=errcode, errmsg=errmsg)
+        water_tracer=.true., bulk_water_name=trim(sname),          &
+        errcode=errcode, errmsg=errmsg)
   end do
   deallocate(suite_props)
 end do
@@ -612,10 +613,13 @@ host_constituents = [host_constituents, my_tracers(1:ntracer)]
 call ccpp_register_constituents(host_constituents, inst, errcode, errmsg)
 ```
 
-The bulk-water index each tracer tracks is not knowable here — constituent
-indices do not exist until the table is locked.  Set it after
-`ccpp_initialize_constituents`, via `%set_bulk_water_index` on the entry
-from `ccpp_model_const_properties`.
+`bulk_water_name` records, at registration, the standard name of the bulk
+species each tracer tracks; it may only be passed for a constituent that is
+also registered with `water_tracer=.true.`.  The bulk-water *index* is not
+knowable here — constituent indices do not exist until the table is locked.
+Set it after `ccpp_initialize_constituents`, via `%set_bulk_water_index` on
+the entry from `ccpp_model_const_properties`, looking the constituent up by
+the name `%bulk_water_name` returns.
 
 ### `ccpp_deallocate_dynamic_constituents(instance_number)`
 
